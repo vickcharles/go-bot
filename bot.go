@@ -13,57 +13,54 @@ import (
 	"github.com/joho/godotenv"
 )
 
-
 var client *binance.Client
 
 const (
-	symbol         = "BTCUSDT"
-	quantity       = 0.00130 // 500 USDT
-	rsiPeriod      = 14
-	rsiOverbought  = 69.0
-	rsiOversold    = 30.0
-	checkInterval  = 5 * time.Minute // Intervalo de 10 minutos
+	symbol        = "BTCUSDT"
+	quantity      = 0.00130
+	rsiPeriod     = 14
+	rsiOverbought = 69.0
+	rsiOversold   = 30.0
+	checkInterval = 5 * time.Minute
 )
 
-// Carga las variables de entorno desde el archivo .env
+// Load environment variables from the .env file
 func loadEnv() {
 	err := godotenv.Load()
 	if err != nil {
-		log.Fatal("Error al cargar el archivo .env")
+		log.Fatal("Error loading .env file")
 	}
 }
 
-// Inicializa el cliente de Binance con las claves API
+// Initialize the Binance client with API keys
 func initBinanceClient() {
 	apiKey := os.Getenv("BINANCE_API_KEY")
 	apiSecret := os.Getenv("BINANCE_API_SECRET")
 	client = binance.NewClient(apiKey, apiSecret)
 }
 
-// Obtiene los precios de cierre de las últimas velas de 10 minutos
-// Obtenemos las velas históricas de Binance para el símbolo BTC/USDT
+// Get closing prices from the last 5-minute candles
 func getHistoricalData(symbol string, limit int) ([]float64, error) {
-    klines, err := client.NewKlinesService().Symbol(symbol).
-        Interval("5m"). // Usamos intervalos de 5 minutos
-        Limit(100).   // Obtenemos el número de velas solicitado
-        Do(context.Background())
-    if err != nil {
-        return nil, err
-    }
+	klines, err := client.NewKlinesService().Symbol(symbol).
+		Interval("5m").
+		Limit(100).
+		Do(context.Background())
+	if err != nil {
+		return nil, err
+	}
 
-    var closes []float64
-    for _, kline := range klines {
-        closePrice, _ := strconv.ParseFloat(kline.Close, 64)
-        closes = append(closes, closePrice)
-    }
-    return closes, nil
+	var closes []float64
+	for _, kline := range klines {
+		closePrice, _ := strconv.ParseFloat(kline.Close, 64)
+		closes = append(closes, closePrice)
+	}
+	return closes, nil
 }
 
-// Calcula el RSI basado en los precios de cierre utilizando SMA
+// Calculate RSI based on closing prices using SMA
 func calculateRSIWithSMA(closes []float64, period int) float64 {
 	var gains, losses []float64
 
-	// Inicializamos las ganancias y pérdidas
 	for i := 1; i < len(closes); i++ {
 		change := closes[i] - closes[i-1]
 		if change > 0 {
@@ -75,29 +72,24 @@ func calculateRSIWithSMA(closes []float64, period int) float64 {
 		}
 	}
 
-	// Calcular las ganancias y pérdidas promedio usando SMA
 	averageGain := sum(gains[:period]) / float64(period)
 	averageLoss := sum(losses[:period]) / float64(period)
 
-	// Ahora aplicamos la SMA en cada paso a partir del período 15 en adelante
 	for i := period; i < len(gains); i++ {
 		averageGain = (averageGain*(float64(period-1)) + gains[i]) / float64(period)
 		averageLoss = (averageLoss*(float64(period-1)) + losses[i]) / float64(period)
 	}
-
-	// Si no hay pérdidas, el RSI es 100 (sobrecompra extrema)
 	if averageLoss == 0 {
 		return 100
 	}
 
-	// Cálculo del RSI
 	rs := averageGain / averageLoss
 	rsi := 100 - (100 / (1 + rs))
 
 	return rsi
 }
 
-// Función auxiliar para sumar un slice de float64
+// Helper function to sum a slice of float64
 func sum(values []float64) float64 {
 	total := 0.0
 	for _, v := range values {
@@ -106,7 +98,7 @@ func sum(values []float64) float64 {
 	return total
 }
 
-// Obtiene el balance disponible de un activo
+// Get the available balance of an asset
 func getBalance(asset string) (float64, error) {
 	account, err := client.NewGetAccountService().Do(context.Background())
 	if err != nil {
@@ -118,14 +110,12 @@ func getBalance(asset string) (float64, error) {
 			return freeBalance, nil
 		}
 	}
-	return 0, fmt.Errorf("asset %s no encontrado", asset)
+	return 0, fmt.Errorf("asset %s not found", asset)
 }
 
 func roundToStepSize(quantity, stepSize float64) float64 {
 	return math.Floor(quantity/stepSize) * stepSize
 }
-
-
 
 func getLotSize(symbol string) (float64, error) {
 	exchangeInfo, err := client.NewExchangeInfoService().Do(context.Background())
@@ -143,7 +133,7 @@ func getLotSize(symbol string) (float64, error) {
 			}
 		}
 	}
-	return 0, fmt.Errorf("LOT_SIZE no encontrado para %s", symbol)
+	return 0, fmt.Errorf("LOT_SIZE not found for %s", symbol)
 }
 
 func trade(symbol string, side binance.SideType) {
@@ -151,83 +141,77 @@ func trade(symbol string, side binance.SideType) {
 	var err error
 
 	if side == binance.SideTypeSell {
-		// Obtener el balance de BTC
+		// Get BTC balance
 		balance, err = getBalance("BTC")
 		if err != nil {
-			log.Println("Error al obtener el balance de BTC:", err)
+			log.Println("Error getting BTC balance:", err)
 			return
 		}
 
-		// Obtener el tamaño mínimo de lote para el par BTCUSDT
+		// Get the minimum lot size for BTCUSDT
 		stepSize, err := getLotSize(symbol)
 		if err != nil {
-			log.Println("Error al obtener el tamaño mínimo de lote:", err)
+			log.Println("Error getting minimum lot size:", err)
 			return
 		}
 
-		// Redondear el balance al tamaño permitido por LOT_SIZE
+		// Round the balance to the allowed LOT_SIZE
 		balance = roundToStepSize(balance, stepSize)
 
-		// Verificar si el balance es mayor que cero después de redondear
+		// Check if the balance is greater than zero after rounding
 		if balance <= 0 {
-			log.Println("Balance insuficiente para realizar la operación.")
+			log.Println("Insufficient balance to execute the operation.")
 			return
 		}
 	} else {
-		// Si es compra, usamos la cantidad fija definida
+		// For buy orders, use the fixed quantity
 		balance = quantity
 	}
 
-	// Realizar la operación
+	// Execute the order
 	order, err := client.NewCreateOrderService().Symbol(symbol).
 		Side(side).
 		Type(binance.OrderTypeMarket).
 		Quantity(fmt.Sprintf("%.6f", balance)).
 		Do(context.Background())
 	if err != nil {
-		log.Println("Error al realizar la operación:", err)
+		log.Println("Error executing the operation:", err)
 		return
 	}
 
-	log.Printf("Operación ejecutada: %s %s %f", side, symbol, balance)
-	log.Println("Detalles de la orden:", order)
+	log.Printf("Operation executed: %s %s %f", side, symbol, balance)
+	log.Println("Order details:", order)
 }
 
-// Verifica el RSI y ejecuta órdenes de compra o venta según el valor del RSI
+// Check RSI and execute buy or sell orders based on RSI value
 func checkRSIAndTrade() {
 	closes, err := getHistoricalData(symbol, rsiPeriod+1)
 	if err != nil {
-		log.Println("Error al obtener los datos históricos:", err)
+		log.Println("Error getting historical data:", err)
 		return
 	}
 
 	rsi := calculateRSIWithSMA(closes, rsiPeriod)
-	log.Printf("RSI actual: %.2f", rsi)
+	log.Printf("Current RSI: %.2f", rsi)
 
 	if rsi <= rsiOversold {
-		log.Println("RSI por debajo de 30. Ejecutando compra.")
-		trade(symbol,  binance.SideTypeBuy)
+		log.Println("RSI below 30. Executing buy.")
+		trade(symbol, binance.SideTypeBuy)
 	} else if rsi >= rsiOverbought {
-		log.Println("RSI por encima de 69. Ejecutando venta.")
+		log.Println("RSI above 69. Executing sell.")
 		trade(symbol, binance.SideTypeSell)
 	}
 	closes = nil
 }
 
 func main() {
-	// Cargar variables de entorno y configurar cliente de Binance
-
+	// Load environment variables and initialize Binance client
 	loadEnv()
 	initBinanceClient()
 
-	// Ejecutar el chequeo del RSI cada 10 minutos
-
-	
+	// Run the RSI check at regular intervals
 	for {
 		checkRSIAndTrade()
-
-		// Esperar 5 minutos antes de volver a ejecutar el chequeo
 		time.Sleep(checkInterval)
 	}
-	
 }
