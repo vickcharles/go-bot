@@ -1,0 +1,13 @@
+app = "7-bot"
+primary_region = "mad"
+
+[build]
+  dockerfile = "Dockerfile"  # Si usas un Dockerfile, lo especificas aquí.
+
+[[vm]]
+  memory = "1gb"
+  cpu_kind = "shared"
+  cpus = 1
+
+[scale]
+  count = 1 
