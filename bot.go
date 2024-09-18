@@ -2,18 +2,16 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
-	"math"
 	"os"
 	"strconv"
-	"time"
 
 	"github.com/adshao/go-binance/v2"
 	"github.com/joho/godotenv"
 )
 
 var client *binance.Client
+var closes []float64 // Variable global para almacenar los precios de cierre
 
 const (
 	symbol        = "BTCUSDT"
@@ -21,7 +19,6 @@ const (
 	rsiPeriod     = 14
 	rsiOverbought = 69.0
 	rsiOversold   = 30.0
-	checkInterval = 5 * time.Minute
 )
 
 // Load environment variables from the .env file
@@ -37,24 +34,6 @@ func initBinanceClient() {
 	apiKey := os.Getenv("BINANCE_API_KEY")
 	apiSecret := os.Getenv("BINANCE_API_SECRET")
 	client = binance.NewClient(apiKey, apiSecret)
-}
-
-// Get closing prices from the last 5-minute candles
-func getHistoricalData(symbol string, limit int) ([]float64, error) {
-	klines, err := client.NewKlinesService().Symbol(symbol).
-		Interval("5m").
-		Limit(100).
-		Do(context.Background())
-	if err != nil {
-		return nil, err
-	}
-
-	var closes []float64
-	for _, kline := range klines {
-		closePrice, _ := strconv.ParseFloat(kline.Close, 64)
-		closes = append(closes, closePrice)
-	}
-	return closes, nil
 }
 
 // Calculate RSI based on closing prices using SMA
@@ -98,99 +77,8 @@ func sum(values []float64) float64 {
 	return total
 }
 
-// Get the available balance of an asset
-func getBalance(asset string) (float64, error) {
-	account, err := client.NewGetAccountService().Do(context.Background())
-	if err != nil {
-		return 0, err
-	}
-	for _, balance := range account.Balances {
-		if balance.Asset == asset {
-			freeBalance, _ := strconv.ParseFloat(balance.Free, 64)
-			return freeBalance, nil
-		}
-	}
-	return 0, fmt.Errorf("asset %s not found", asset)
-}
-
-func roundToStepSize(quantity, stepSize float64) float64 {
-	return math.Floor(quantity/stepSize) * stepSize
-}
-
-func getLotSize(symbol string) (float64, error) {
-	exchangeInfo, err := client.NewExchangeInfoService().Do(context.Background())
-	if err != nil {
-		return 0, err
-	}
-
-	for _, s := range exchangeInfo.Symbols {
-		if s.Symbol == symbol {
-			for _, filter := range s.Filters {
-				if filter["filterType"] == "LOT_SIZE" {
-					stepSize, _ := strconv.ParseFloat(filter["stepSize"].(string), 64)
-					return stepSize, nil
-				}
-			}
-		}
-	}
-	return 0, fmt.Errorf("LOT_SIZE not found for %s", symbol)
-}
-
-func trade(symbol string, side binance.SideType) {
-	var balance float64
-	var err error
-
-	if side == binance.SideTypeSell {
-		// Get BTC balance
-		balance, err = getBalance("BTC")
-		if err != nil {
-			log.Println("Error getting BTC balance:", err)
-			return
-		}
-
-		// Get the minimum lot size for BTCUSDT
-		stepSize, err := getLotSize(symbol)
-		if err != nil {
-			log.Println("Error getting minimum lot size:", err)
-			return
-		}
-
-		// Round the balance to the allowed LOT_SIZE
-		balance = roundToStepSize(balance, stepSize)
-
-		// Check if the balance is greater than zero after rounding
-		if balance <= 0 {
-			log.Println("Insufficient balance to execute the operation.")
-			return
-		}
-	} else {
-		// For buy orders, use the fixed quantity
-		balance = quantity
-	}
-
-	// Execute the order
-	order, err := client.NewCreateOrderService().Symbol(symbol).
-		Side(side).
-		Type(binance.OrderTypeMarket).
-		Quantity(fmt.Sprintf("%.6f", balance)).
-		Do(context.Background())
-	if err != nil {
-		log.Println("Error executing the operation:", err)
-		return
-	}
-
-	log.Printf("Operation executed: %s %s %f", side, symbol, balance)
-	log.Println("Order details:", order)
-}
-
-// Check RSI and execute buy or sell orders based on RSI value
-func checkRSIAndTrade() {
-	closes, err := getHistoricalData(symbol, rsiPeriod+1)
-	if err != nil {
-		log.Println("Error getting historical data:", err)
-		return
-	}
-
+// Check RSI and log the result
+func checkRSIAndTrade(closes []float64) {
 	rsi := calculateRSIWithSMA(closes, rsiPeriod)
 	log.Printf("Current RSI: %.2f", rsi)
 
@@ -201,17 +89,73 @@ func checkRSIAndTrade() {
 		log.Println("RSI above 69. Executing sell.")
 		trade(symbol, binance.SideTypeSell)
 	}
-	closes = nil
 }
+
+// Perform trading operation (buy/sell)
+func trade(symbol string, side binance.SideType) {
+	// Aquí puedes implementar tu lógica de trading si es necesario
+	log.Printf("Trade executed: %s %s", side, symbol)
+}
+
+// Get closing prices from the last 5-minute candles
+func getHistoricalData(symbol string, limit int) ([]float64, error) {
+	klines, err := client.NewKlinesService().Symbol(symbol).
+		Interval("5m").
+		Limit(100).
+		Do(context.Background())
+	if err != nil {
+		return nil, err
+	}
+
+	var closes []float64
+	for _, kline := range klines {
+		closePrice, _ := strconv.ParseFloat(kline.Close, 64)
+		closes = append(closes, closePrice)
+	}
+	return closes, nil
+}
+
 
 func main() {
 	// Load environment variables and initialize Binance client
 	loadEnv()
 	initBinanceClient()
 
-	// Run the RSI check at regular intervals
-	for {
-		checkRSIAndTrade()
-		time.Sleep(checkInterval)
+	// Obtener datos históricos para inicializar los precios de cierre
+	var err error
+	closes, err = getHistoricalData(symbol, rsiPeriod+1)
+	if err != nil {
+		log.Fatalf("Error fetching historical data: %v", err)
 	}
+
+	// Real-time price data using WebSocket
+	wsKlineHandler := func(event *binance.WsKlineEvent) {
+		// Solo añadir el precio de cierre cuando la vela se ha cerrado
+		if event.Kline.IsFinal {
+			closePrice, _ := strconv.ParseFloat(event.Kline.Close, 64)
+			closes = append(closes, closePrice)
+
+			// Maintain only the last rsiPeriod+1 closes
+			if len(closes) > rsiPeriod+1 {
+				closes = closes[1:]
+			}
+
+			// Calculate and check RSI if we have enough data points
+			if len(closes) >= rsiPeriod+1 {
+				checkRSIAndTrade(closes)
+			}
+		}
+	}
+
+	errHandler := func(err error) {
+		log.Println(err)
+	}
+
+	// Start WebSocket for 1m candlestick data
+	doneC, _, err := binance.WsKlineServe(symbol, "5m", wsKlineHandler, errHandler)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	<-doneC
 }
